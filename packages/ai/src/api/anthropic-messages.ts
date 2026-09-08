@@ -1,15 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
-import type {
-	BetaStopReason,
-	BetaThinkingDroppedInputTransformation,
-	BetaTool,
-	BetaCacheControlEphemeral as CacheControlEphemeral,
-	BetaContentBlockParam as ContentBlockParam,
-	MessageCreateParamsStreaming,
-	BetaMessageParam as MessageParam,
-	BetaRawMessageStreamEvent as RawMessageStreamEvent,
-	BetaRefusalStopDetails as RefusalStopDetails,
-} from "@anthropic-ai/sdk/resources/beta/messages/messages.js";
 import { calculateCost } from "../models.ts";
 import type {
 	AnthropicMessagesCompat,
@@ -46,6 +34,155 @@ import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampMaxTokensToContext } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
+
+interface CacheControlEphemeral {
+	type: "ephemeral";
+	ttl?: "1h";
+}
+
+type ContentBlockParam =
+	| { type: "text"; text: string; cache_control?: CacheControlEphemeral }
+	| {
+			type: "image";
+			source: { type: "base64"; media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp"; data: string };
+			cache_control?: CacheControlEphemeral;
+	  }
+	| { type: "thinking"; thinking: string; signature: string }
+	| { type: "redacted_thinking"; data: string }
+	| { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+	| {
+			type: "tool_result";
+			tool_use_id: string;
+			content: string | ContentBlockParam[];
+			is_error: boolean;
+			cache_control?: CacheControlEphemeral;
+	  }
+	| { type: "tool_reference"; tool_name: string };
+
+interface MessageParam {
+	role: "user" | "assistant" | "system";
+	content: string | ContentBlockParam[];
+	output_config?: { effort: AnthropicEffort };
+}
+
+interface BetaTool {
+	name: string;
+	description: string;
+	input_schema: Record<string, unknown>;
+	eager_input_streaming?: boolean;
+	strict?: boolean;
+	defer_loading?: boolean;
+	cache_control?: CacheControlEphemeral;
+}
+
+interface MessageCreateParamsStreaming {
+	model: string;
+	messages: MessageParam[];
+	max_tokens: number;
+	stream: true;
+	betas?: string[];
+	system?: Array<{ type: "text"; text: string; cache_control?: CacheControlEphemeral }>;
+	temperature?: number;
+	tools?: BetaTool[];
+	thinking?:
+		| {
+				type: "adaptive";
+				display: AnthropicThinkingDisplay;
+				block_binding?: { prefix_mismatch_behavior: "drop_block" };
+		  }
+		| { type: "enabled"; budget_tokens: number; display: AnthropicThinkingDisplay }
+		| { type: "disabled" };
+	output_config?: { effort: AnthropicEffort };
+	metadata?: { user_id: string };
+	tool_choice?: { type: "auto" | "any" | "none" } | { type: "tool"; name: string };
+	fallbacks?: Array<{ model: string }>;
+}
+
+interface AnthropicUsage {
+	input_tokens?: number;
+	output_tokens?: number;
+	cache_read_input_tokens?: number;
+	cache_creation_input_tokens?: number;
+	cache_creation?: { ephemeral_1h_input_tokens?: number };
+	output_tokens_details?: { thinking_tokens?: number };
+}
+
+interface AnthropicThinkingDroppedInputTransformation {
+	type?: string;
+	path?: string;
+	reason?: string;
+}
+
+interface RefusalStopDetails {
+	explanation?: string;
+}
+
+type RawMessageStreamEvent =
+	| {
+			type: "message_start";
+			message: {
+				id: string;
+				model: string;
+				usage: AnthropicUsage;
+				input_transformations?: AnthropicThinkingDroppedInputTransformation[];
+			};
+	  }
+	| {
+			type: "content_block_start";
+			index: number;
+			content_block:
+				| { type: "text"; text?: string }
+				| { type: "thinking"; thinking?: string; signature?: string }
+				| { type: "redacted_thinking"; data: string }
+				| { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+				| { type: "fallback" };
+	  }
+	| {
+			type: "content_block_delta";
+			index: number;
+			delta:
+				| { type: "text_delta"; text: string }
+				| { type: "thinking_delta"; thinking: string }
+				| { type: "input_json_delta"; partial_json: string }
+				| { type: "signature_delta"; signature: string };
+	  }
+	| { type: "content_block_stop"; index: number }
+	| {
+			type: "message_delta";
+			delta: { stop_reason?: string; stop_details?: RefusalStopDetails | null };
+			usage?: AnthropicUsage;
+			input_transformations?: AnthropicThinkingDroppedInputTransformation[];
+	  }
+	| { type: "message_stop" };
+
+interface AnthropicRequestOptions {
+	signal?: AbortSignal;
+	timeout?: number;
+	maxRetries: number;
+}
+
+export interface AnthropicMessagesClient {
+	beta: {
+		messages: {
+			create: (
+				params: MessageCreateParamsStreaming,
+				options: AnthropicRequestOptions,
+			) => { asResponse: () => Promise<Response> };
+		};
+	};
+}
+
+class AnthropicHttpError extends Error {
+	status: number;
+	headers: Headers;
+
+	constructor(response: Response, body: string) {
+		super(body || response.statusText || `Anthropic request failed with status ${response.status}`);
+		this.name = "AnthropicHttpError";
+		this.status = response.status;
+		this.headers = response.headers;
+	}
+}
 
 /**
  * Resolve cache retention preference.
@@ -269,10 +406,10 @@ export interface AnthropicOptions extends StreamOptions {
 	toolChoice?: "auto" | "any" | "none" | { type: "tool"; name: string };
 	/**
 	 * Pre-built Anthropic client instance. When provided, skips internal client
-	 * construction entirely. Use this to inject alternative SDK clients such as
-	 * `AnthropicVertex` that shares the same messaging API.
+	 * construction entirely. The client must expose the Anthropic Messages
+	 * `beta.messages.create(...).asResponse()` interface.
 	 */
-	client?: Anthropic;
+	client?: AnthropicMessagesClient;
 }
 
 function mergeHeaders(...headerSources: (ProviderHeaders | undefined)[]): ProviderHeaders {
@@ -531,10 +668,10 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 		};
 
 		try {
-			let client: Anthropic;
+			let client: AnthropicMessagesClient;
 			let isOAuth: boolean;
 			let usageModel = model;
-			let inputTransformations: BetaThinkingDroppedInputTransformation[] | undefined;
+			let inputTransformations: AnthropicThinkingDroppedInputTransformation[] | undefined;
 
 			if (options?.client) {
 				client = options.client;
@@ -903,18 +1040,16 @@ function createClient(
 	fetch?: typeof globalThis.fetch,
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
-): { client: Anthropic; isOAuthToken: boolean } {
+): { client: AnthropicMessagesClient; isOAuthToken: boolean } {
 	// Copilot: Bearer auth.
 	if (model.provider === "github-copilot") {
-		const client = new Anthropic({
-			apiKey: null,
-			authToken: apiKey ?? null,
-			baseURL: model.baseUrl,
-			dangerouslyAllowBrowser: true,
+		const client = createNativeClient({
+			baseUrl: model.baseUrl,
 			fetch,
-			defaultHeaders: mergeClientHeaders(
+			headers: mergeClientHeaders(
 				{
 					accept: "application/json",
+					...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
 					"anthropic-dangerous-direct-browser-access": "true",
 				},
 				model.headers,
@@ -928,15 +1063,13 @@ function createClient(
 
 	// OAuth: Bearer auth, Claude Code identity headers
 	if (apiKey && isOAuthToken(apiKey)) {
-		const client = new Anthropic({
-			apiKey: null,
-			authToken: apiKey,
-			baseURL: model.baseUrl,
-			dangerouslyAllowBrowser: true,
+		const client = createNativeClient({
+			baseUrl: model.baseUrl,
 			fetch,
-			defaultHeaders: mergeClientHeaders(
+			headers: mergeClientHeaders(
 				{
 					accept: "application/json",
+					Authorization: `Bearer ${apiKey}`,
 					"anthropic-dangerous-direct-browser-access": "true",
 					"user-agent": `claude-cli/${claudeCodeVersion}`,
 					"x-app": "cli",
@@ -961,16 +1094,56 @@ function createClient(
 		model.headers,
 		optionsHeaders,
 	);
-	const client = new Anthropic({
-		apiKey: apiKey ?? null,
-		authToken: null,
-		baseURL: model.baseUrl,
-		dangerouslyAllowBrowser: true,
+	const client = createNativeClient({
+		baseUrl: model.baseUrl,
 		fetch,
-		defaultHeaders,
+		headers: mergeHeaders(apiKey ? { "x-api-key": apiKey } : undefined, defaultHeaders),
 	});
 
 	return { client, isOAuthToken: false };
+}
+
+function createNativeClient(options: {
+	baseUrl: string;
+	headers: ProviderHeaders;
+	fetch?: typeof globalThis.fetch;
+}): AnthropicMessagesClient {
+	return {
+		beta: {
+			messages: {
+				create: (params, requestOptions) => ({
+					asResponse: async () => {
+						const { betas, ...body } = params;
+						const headers = new Headers({
+							"anthropic-version": "2023-06-01",
+							"content-type": "application/json",
+						});
+						for (const [name, value] of Object.entries(options.headers)) {
+							if (value === null) headers.delete(name);
+							else headers.set(name, value);
+						}
+						if (betas && betas.length > 0) headers.set("anthropic-beta", betas.join(","));
+
+						const timeoutSignal = AbortSignal.timeout(requestOptions.timeout ?? 600_000);
+						const signal = requestOptions.signal
+							? AbortSignal.any([requestOptions.signal, timeoutSignal])
+							: timeoutSignal;
+						const response = await (options.fetch ?? globalThis.fetch)(
+							`${options.baseUrl.replace(/\/$/, "")}/v1/messages?beta=true`,
+							{
+								method: "POST",
+								headers,
+								body: JSON.stringify(body),
+								signal,
+							},
+						);
+						if (!response.ok) throw new AnthropicHttpError(response, await response.text());
+						return response;
+					},
+				}),
+			},
+		},
+	};
 }
 
 function getBetaFeatures(
@@ -1459,7 +1632,7 @@ function convertTools(
 }
 
 function mapStopReason(
-	reason: BetaStopReason | string,
+	reason: string,
 	stopDetails?: RefusalStopDetails | null,
 ): { stopReason: StopReason; errorMessage?: string } {
 	switch (reason) {

@@ -250,7 +250,7 @@ models.setProvider(anthropicProvider());
 models.setProvider(openrouterProvider());
 ```
 
-Provider factories import their model catalog and a lazy API wrapper. They do not import other providers. With bundler code splitting, SDK implementations (`@anthropic-ai/sdk`, `openai`, `@google/genai`, etc.) stay in lazy chunks loaded on the first request to a model of that API.
+Provider factories import their model catalog and a lazy API wrapper. They do not import other providers. With bundler code splitting, external SDK implementations (`openai`, `@google/genai`, etc.) stay in lazy chunks loaded on the first request to a model of that API; the Anthropic Messages transport uses native `fetch`.
 
 ### All Built-in Providers
 

@@ -6,6 +6,10 @@
 
 - Added Anthropic per-turn effort persistence, deterministic historical effort markers, and signed-thinking mismatch recovery for supported Claude models across Anthropic Messages transports, including OpenRouter.
 
+### Changed
+
+- Replaced the Anthropic Messages SDK transport with native `fetch`, removing its external SDK dependency.
+
 ### Fixed
 
 - Removed the unnecessary Chord dependency from pi-ai by defining its exported `JsonValue` type directly.
