@@ -70,7 +70,7 @@ pi
 |----------|----------------------|------------------|
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
 | Ant Ling | `ANT_LING_API_KEY` | `ant-ling` |
-| Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
+| Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` or Microsoft Entra ID | `azure-openai-responses` |
 | OpenAI | `OPENAI_API_KEY` | `openai` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` |
 | NVIDIA NIM | `NVIDIA_API_KEY` | `nvidia` |
@@ -187,6 +187,18 @@ OAuth credentials are also stored here after `/login` and managed automatically.
 ## Cloud Providers
 
 ### Azure OpenAI
+
+Use `/login azure-openai-responses` and select either **API key** or **Microsoft Entra ID**. Entra ID uses `DefaultAzureCredential`, including Azure CLI credentials, managed identity, workload identity, and service-principal environment variables. The identity needs the **Cognitive Services OpenAI User** role on the Azure OpenAI resource.
+
+For non-interactive configuration, enable Entra ID after signing in with Azure CLI or configuring another supported credential:
+
+```bash
+az login
+export AZURE_OPENAI_USE_AAD=true
+export AZURE_OPENAI_BASE_URL=https://your-resource.ai.azure.com
+```
+
+API-key authentication remains supported:
 
 ```bash
 export AZURE_OPENAI_API_KEY=...

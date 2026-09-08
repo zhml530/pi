@@ -6,7 +6,8 @@ import { getModel } from "../src/compat.ts";
 import type { Context, Model } from "../src/types.ts";
 
 interface CapturedAzureClientOptions {
-	apiKey: string;
+	apiKey?: string;
+	azureADTokenProvider?: () => Promise<string>;
 	apiVersion: string;
 	dangerouslyAllowBrowser: boolean;
 	defaultHeaders?: Record<string, string>;
@@ -22,6 +23,24 @@ interface CapturedAzureResponsesPayload {
 const azureMock = vi.hoisted(() => ({
 	constructorCalls: [] as CapturedAzureClientOptions[],
 	lastParams: undefined as CapturedAzureResponsesPayload | undefined,
+}));
+
+const identityMock = vi.hoisted(() => ({
+	constructorCalls: 0,
+	getTokenCalls: [] as Array<{ scope: string; abortSignal?: AbortSignal }>,
+}));
+
+vi.mock("@azure/identity", () => ({
+	DefaultAzureCredential: class {
+		constructor() {
+			identityMock.constructorCalls++;
+		}
+
+		async getToken(scope: string, options?: { abortSignal?: AbortSignal }) {
+			identityMock.getTokenCalls.push({ scope, abortSignal: options?.abortSignal });
+			return { token: "aad-token", expiresOnTimestamp: Date.now() + 60_000 };
+		}
+	},
 }));
 
 vi.mock("openai", () => {
@@ -55,6 +74,8 @@ const originalAzureOpenAIApiKey = process.env.AZURE_OPENAI_API_KEY;
 beforeEach(() => {
 	azureMock.constructorCalls.length = 0;
 	azureMock.lastParams = undefined;
+	identityMock.constructorCalls = 0;
+	identityMock.getTokenCalls.length = 0;
 	delete process.env.AZURE_OPENAI_BASE_URL;
 	delete process.env.AZURE_OPENAI_RESOURCE_NAME;
 	delete process.env.AZURE_OPENAI_API_VERSION;
@@ -223,5 +244,38 @@ describe("azure-openai-responses user agent", () => {
 
 	it("lets explicit headers override the default User-Agent", async () => {
 		expect((await captureClientHeaders({ "User-Agent": "custom-agent" }))["User-Agent"]).toBe("custom-agent");
+	});
+});
+
+describe("azure-openai-responses Microsoft Entra ID", () => {
+	it("uses DefaultAzureCredential with the Cognitive Services scope", async () => {
+		const signal = new AbortController().signal;
+		const model = getModel("azure-openai-responses", "gpt-4o-mini");
+		await streamAzureOpenAIResponses(model, context, {
+			azureBaseUrl: "https://my-resource.openai.azure.com",
+			env: { AZURE_OPENAI_USE_AAD: "true" },
+			signal,
+		}).result();
+
+		expect(identityMock.constructorCalls).toBe(1);
+		expect(azureMock.constructorCalls).toHaveLength(1);
+		expect(azureMock.constructorCalls[0].apiKey).toBeUndefined();
+		expect(await azureMock.constructorCalls[0].azureADTokenProvider?.()).toBe("aad-token");
+		expect(identityMock.getTokenCalls).toEqual([
+			{ scope: "https://cognitiveservices.azure.com/.default", abortSignal: signal },
+		]);
+	});
+
+	it("keeps API key auth when both methods are configured", async () => {
+		const model = getModel("azure-openai-responses", "gpt-4o-mini");
+		await streamAzureOpenAIResponses(model, context, {
+			apiKey: "test-api-key",
+			azureBaseUrl: "https://my-resource.openai.azure.com",
+			env: { AZURE_OPENAI_USE_AAD: "true" },
+		}).result();
+
+		expect(identityMock.constructorCalls).toBe(0);
+		expect(azureMock.constructorCalls[0].apiKey).toBe("test-api-key");
+		expect(azureMock.constructorCalls[0].azureADTokenProvider).toBeUndefined();
 	});
 });

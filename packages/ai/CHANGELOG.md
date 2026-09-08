@@ -5,6 +5,7 @@
 ### Added
 
 - Added Anthropic per-turn effort persistence, deterministic historical effort markers, and signed-thinking mismatch recovery for supported Claude models across Anthropic Messages transports, including OpenRouter.
+- Added Microsoft Entra ID authentication for Azure OpenAI through `DefaultAzureCredential`.
 
 ### Changed
 

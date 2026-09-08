@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Microsoft Entra ID authentication for Azure OpenAI through `/login azure-openai-responses` or `AZURE_OPENAI_USE_AAD=true`.
+
 ### Fixed
 
 - Fixed the write tool reporting UTF-16 code-unit counts as byte counts by removing the misleading count ([#8979](https://github.com/earendil-works/pi/issues/8979)).

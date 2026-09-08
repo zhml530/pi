@@ -1,3 +1,4 @@
+import { DefaultAzureCredential } from "@azure/identity";
 import { AzureOpenAI } from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
@@ -22,6 +23,7 @@ import { convertResponsesMessages, convertResponsesTools, processResponsesStream
 import { buildBaseOptions } from "./simple-options.ts";
 
 const DEFAULT_AZURE_API_VERSION = "v1";
+const AZURE_OPENAI_TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default";
 const AZURE_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "azure-openai-responses"]);
 // OpenAI Responses rejects max_output_tokens below 16: https://github.com/earendil-works/pi/issues/6265
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
@@ -99,10 +101,13 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 		try {
 			// Create Azure OpenAI client
 			const apiKey = options?.apiKey;
-			if (!apiKey) {
-				throw new Error(`No API key for provider: ${model.provider}`);
+			const useDefaultAzureCredential = isDefaultAzureCredentialEnabled(options);
+			if (!apiKey && !useDefaultAzureCredential) {
+				throw new Error(
+					`No Azure OpenAI credentials for provider: ${model.provider}. Set AZURE_OPENAI_API_KEY or enable Microsoft Entra ID authentication.`,
+				);
 			}
-			const client = createClient(model, apiKey, options);
+			const client = createClient(model, apiKey, useDefaultAzureCredential, options);
 			const grammarToolInputProperties = createGrammarToolInputProperties(
 				context.tools,
 				model.compat?.supportsOpenAIGrammarTools ?? false,
@@ -250,7 +255,17 @@ function resolveAzureConfig(
 	};
 }
 
-function createClient(model: Model<"azure-openai-responses">, apiKey: string, options?: AzureOpenAIResponsesOptions) {
+function isDefaultAzureCredentialEnabled(options?: AzureOpenAIResponsesOptions): boolean {
+	const value = getProviderEnvValue("AZURE_OPENAI_USE_AAD", options?.env);
+	return value === "1" || value?.toLowerCase() === "true";
+}
+
+function createClient(
+	model: Model<"azure-openai-responses">,
+	apiKey: string | undefined,
+	useDefaultAzureCredential: boolean,
+	options?: AzureOpenAIResponsesOptions,
+) {
 	const headers = { "User-Agent": getPiUserAgent(), ...model.headers };
 
 	if (options?.headers) {
@@ -258,9 +273,17 @@ function createClient(model: Model<"azure-openai-responses">, apiKey: string, op
 	}
 
 	const { baseUrl, apiVersion } = resolveAzureConfig(model, options);
+	const credential = useDefaultAzureCredential ? new DefaultAzureCredential() : undefined;
+	const azureADTokenProvider = credential
+		? async () => {
+				const token = await credential.getToken(AZURE_OPENAI_TOKEN_SCOPE, { abortSignal: options?.signal });
+				if (!token) throw new Error("DefaultAzureCredential returned no Azure OpenAI access token");
+				return token.token;
+			}
+		: undefined;
 
 	return new AzureOpenAI({
-		apiKey,
+		...(apiKey ? { apiKey } : { azureADTokenProvider }),
 		apiVersion,
 		dangerouslyAllowBrowser: true,
 		fetch: options?.fetch,
